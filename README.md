@@ -1,2 +1,1 @@
-# kibana-easy-use-script
-A repository for a Tampermonkey script to navigate between Kibana logs
+This repository is empty. Any task executed on it should be considered a new capability and needs to be created.

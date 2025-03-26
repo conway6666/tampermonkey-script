@@ -2,7 +2,7 @@
 // @name         Copy Jira Issue Title
 // @namespace    http://tampermonkey.net/
 // @version      2025-03-24
-// @description  try to take over the world!
+// @description  Copy Jira Issue Id and Title
 // @author       conway
 // @match        https://wonder.atlassian.net/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=atlassian.net

@@ -2,7 +2,7 @@
 // @name         trace report
 // @namespace    http://tampermonkey.net/
 // @version      2025-03-26
-// @description  try to take over the world!
+// @description  Optimized trace report with vertical time axis and visual duration bars
 // @author       You
 // @match        https://kibana.remarkablefoods.net/app/discover*
 // @match        https://kibana.foodtruck-qa.com/app/discover*
@@ -13,27 +13,22 @@
 
 (function() {
     'use strict';
-    // 创建一个MutationObserver来监听DOM变化
+    
+    const HIGH_DURATION_THRESHOLD_NS = 200000000; // 200ms
+
     const observer = new MutationObserver(function(mutations) {
-        // 检查目标元素是否已加载
         const titleElement = document.querySelector('div[data-test-subj="tableDocViewRow-content-value"]');
         if (titleElement) {
-            // 如果找到目标元素且按钮尚未添加，则添加按钮
             addCopyButton(titleElement);
-            // 找到元素后停止观察
             observer.disconnect();
         }
     });
 
-    // 开始观察文档变化
     observer.observe(document.body, {
         childList: true,
         subtree: true
     });
 
-    /**
-     * Escape HTML special characters
-     */
     function escapeHtml(text) {
         if (!text) return '';
         const map = {
@@ -46,9 +41,6 @@
         return text.replace(/[&<>"']/g, m => map[m]);
     }
 
-    /**
-     * Format nanoseconds to a human-readable duration (ms or s)
-     */
     function formatDuration(ns) {
         if (ns === null || ns === undefined) return '';
         const ms = ns / 1000000;
@@ -59,10 +51,18 @@
     }
 
     /**
-     * Process log strings into structured data objects, grouping multi-line logs
-     * @param {string} logString - The input log string with multiple lines
-     * @return {Array} - Array of parsed log objects
+     * Converts the MM:SS.ns timestamp string to total nanoseconds for positioning
      */
+    function parseTimestampToNs(tsStr) {
+        if (!tsStr) return 0;
+        const match = tsStr.match(/(\d{2}):(\d{2})\.(\d{9})/);
+        if (!match) return 0;
+        const mins = parseInt(match[1]);
+        const secs = parseInt(match[2]);
+        const ns = parseInt(match[3]);
+        return (mins * 60 + secs) * 1000000000 + ns;
+    }
+
     function processLogs(logString) {
         const lines = logString.split('\n');
         const groups = [];
@@ -71,7 +71,7 @@
 
         lines.forEach(line => {
             const trimmedLine = line.trim();
-            if (!trimmedLine && !currentGroup) return; // Skip leading empty lines
+            if (!trimmedLine && !currentGroup) return;
 
             if (timestampRegex.test(line)) {
                 if (currentGroup) groups.push(currentGroup);
@@ -84,67 +84,73 @@
         });
         if (currentGroup) groups.push(currentGroup);
         
-        return groups.map(group => {
-            const firstLine = group[0];
+        let maxElapsed = 0;
+        const processed = groups.map((group, index) => {
             const fullText = group.join('\n').trim();
+            const timestampMatch = group[0].match(timestampRegex);
+            const timestampStr = timestampMatch ? timestampMatch[1].trim() : '';
+            const timestampNs = parseTimestampToNs(timestampStr);
             
-            // Extract relative timestamp from first line
-            const timestampMatch = firstLine.match(timestampRegex);
-            const timestamp = timestampMatch ? timestampMatch[1].trim() : '';
-            
-            // Extract elapsed time from the VERY END of the group
             const elapsedMatch = fullText.match(/elapsed=(\d+)$/);
             const elapsedNs = elapsedMatch ? parseInt(elapsedMatch[1]) : null;
+            if (elapsedNs > maxElapsed) maxElapsed = elapsedNs;
             
-            // Extract the core text
             let coreText = fullText;
-            if (timestamp) {
-                // Remove timestamp from the beginning of the fullText
-                const tsIndex = coreText.indexOf(timestamp);
-                coreText = coreText.substring(tsIndex + timestamp.length).trim();
+            if (timestampStr) {
+                const tsIndex = coreText.indexOf(timestampStr);
+                coreText = coreText.substring(tsIndex + timestampStr.length).trim();
             }
             
-            // Remove elapsed part if it exists at the end
             if (elapsedMatch) {
-                const elapsedMarker = ', elapsed=';
-                const lastMarkerIndex = coreText.lastIndexOf(elapsedMarker);
+                const lastMarkerIndex = coreText.lastIndexOf(', elapsed=');
                 if (lastMarkerIndex !== -1 && lastMarkerIndex > coreText.length - 50) {
                     coreText = coreText.substring(0, lastMarkerIndex).trim();
                 } else {
-                    const altMarker = ' elapsed=';
-                    const altMarkerIndex = coreText.lastIndexOf(altMarker);
+                    const altMarkerIndex = coreText.lastIndexOf(' elapsed=');
                     if (altMarkerIndex !== -1 && altMarkerIndex > coreText.length - 50) {
                         coreText = coreText.substring(0, altMarkerIndex).trim();
                     }
                 }
             }
             
-            // Split logger and actual message
             let logger = '';
             let content = coreText;
             const separatorIndex = coreText.indexOf(' - ');
-            if (separatorIndex !== -1 && separatorIndex < 100) { // Logger is usually at the start
+            if (separatorIndex !== -1 && separatorIndex < 100) {
                 logger = coreText.substring(0, separatorIndex).trim();
                 content = coreText.substring(separatorIndex + 3).trim();
             }
 
             return {
-                timestamp,
+                id: `log-row-${index}`,
+                timestampStr,
+                timestampNs,
                 logger,
                 content,
                 elapsed: elapsedNs,
                 formattedElapsed: formatDuration(elapsedNs)
             };
         });
+
+        // Calculate relative positions for time axis
+        if (processed.length > 0) {
+            const startTime = processed[0].timestampNs;
+            const endTime = processed[processed.length - 1].timestampNs;
+            const totalDuration = endTime - startTime || 1;
+            
+            processed.forEach(log => {
+                log.relativePos = ((log.timestampNs - startTime) / totalDuration) * 100;
+                log.durationPercent = log.elapsed ? (log.elapsed / maxElapsed) * 100 : 0;
+            });
+        }
+
+        return processed;
     }
 
-    /**
-     * Build an HTML table from processed logs
-     */
-    function buildReportTable(processedLogs) {
-        let html = `
-            <div id="trace-report-container">
-                <div class="report-header">Trace Execution Report</div>
+    function buildReport(processedLogs) {
+        let axisHtml = '<div id="trace-time-axis"><div id="axis-indicator"></div>';
+        let tableHtml = `
+            <div id="trace-table-container">
                 <table id="trace-report-table">
                     <thead>
                         <tr>
@@ -158,115 +164,225 @@
         `;
 
         processedLogs.forEach(log => {
-            const isHighDuration = log.elapsed > 200000000; // > 0.5s (500ms)
-            html += `
-                <tr>
-                    <td class="col-elapsed ${isHighDuration ? 'high-duration' : ''}">${log.formattedElapsed || ''}</td>
-                    <td class="col-time">${escapeHtml(log.timestamp)}</td>
+            const isHighDuration = log.elapsed > HIGH_DURATION_THRESHOLD_NS;
+            const markerClass = isHighDuration ? 'time-marker high-duration' : 'time-marker';
+            
+            axisHtml += `<div class="${markerClass}" style="top: ${log.relativePos}%" title="${log.formattedElapsed || log.timestampStr}"></div>`;
+            
+            tableHtml += `
+                <tr id="${log.id}" data-pos="${log.relativePos}">
+                    <td class="col-elapsed">
+                        <div class="duration-container ${isHighDuration ? 'high-duration' : ''}">
+                            <span class="${isHighDuration ? 'high-duration-text' : ''}">${log.formattedElapsed || ''}</span>
+                            ${log.elapsed ? `<div class="duration-bar" style="width: ${log.durationPercent}%"></div>` : ''}
+                        </div>
+                    </td>
+                    <td class="col-time">${escapeHtml(log.timestampStr)}</td>
                     <td class="col-logger">${escapeHtml(log.logger)}</td>
                     <td class="col-message">${escapeHtml(log.content)}</td>
                 </tr>
             `;
         });
 
-        html += `
-                    </tbody>
-                </table>
+        axisHtml += '</div>';
+        tableHtml += '</tbody></table></div>';
+
+        return `
+            <div id="trace-report-header" style="margin: 20px 20px 0 20px; font-weight: bold; font-size: 18px; color: #0366d6; border-bottom: 2px solid #0366d6; padding-bottom: 5px;">
+                Trace Execution Report
+            </div>
+            <div id="trace-report-wrapper">
+                ${axisHtml}
+                ${tableHtml}
             </div>
         `;
-        return html;
     }
 
-    /**
-     * Inject necessary CSS styles
-     */
     function injectStyles() {
         if (document.getElementById('trace-report-styles')) return;
         
         const style = document.createElement('style');
         style.id = 'trace-report-styles';
         style.textContent = `
-            #trace-report-container {
-                margin: 20px;
-                padding: 15px;
+            #trace-report-wrapper {
+                display: flex;
+                margin: 0 20px 20px 20px;
+                height: calc(90vh - 100px);
                 background: #ffffff;
                 border: 1px solid #e1e4e8;
-                border-radius: 6px;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
+                border-radius: 0 0 6px 6px;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+                overflow: hidden;
                 font-family: 'Roboto Mono', Menlo, Monaco, Consolas, monospace;
-                color: #24292e;
             }
-            .report-header {
-                font-size: 18px;
-                font-weight: bold;
-                margin-bottom: 15px;
-                padding-bottom: 10px;
-                border-bottom: 2px solid #0366d6;
-                color: #0366d6;
+            #trace-time-axis {
+                width: 30px;
+                background: #f6f8fa;
+                border-right: 1px solid #dfe2e5;
+                position: relative;
+                cursor: pointer;
+                flex-shrink: 0;
+            }
+            .time-marker {
+                position: absolute;
+                left: 0;
+                right: 0;
+                height: 1px;
+                background: #0366d6;
+                opacity: 0.4;
+            }
+            .time-marker.high-duration {
+                background: #d73a49;
+                opacity: 1;
+                height: 3px;
+                z-index: 2;
+                border-top: 1px solid white;
+                border-bottom: 1px solid white;
+            }
+            #axis-indicator {
+                position: absolute;
+                left: 0;
+                right: 0;
+                height: 2px;
+                background: #0366d6;
+                border: 1px solid white;
+                z-index: 5;
+                box-shadow: 0 0 4px rgba(3,102,214,0.5);
+                transition: top 0.1s;
+                pointer-events: none;
+            }
+            #trace-table-container {
+                flex-grow: 1;
+                overflow-y: auto;
+                scroll-behavior: smooth;
             }
             #trace-report-table {
                 width: 100%;
                 border-collapse: collapse;
                 font-size: 12px;
-                line-height: 1.5;
+                table-layout: fixed;
             }
             #trace-report-table th {
                 background: #f6f8fa;
-                color: #586069;
-                text-align: left;
                 padding: 8px 12px;
                 border: 1px solid #dfe2e5;
-                font-weight: 600;
                 position: sticky;
                 top: 0;
+                z-index: 10;
+                text-align: left;
             }
             #trace-report-table td {
                 padding: 6px 12px;
                 border: 1px solid #dfe2e5;
                 vertical-align: top;
+                word-break: break-all;
             }
-            #trace-report-table tr:nth-child(even) {
-                background-color: #f8f9fa;
+            .duration-container {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
             }
-            #trace-report-table tr:hover {
-                background-color: #f1f8ff;
+            .duration-bar {
+                height: 3px;
+                background: #0366d6;
+                opacity: 0.6;
+                margin-top: 2px;
             }
-            .col-elapsed { 
-                width: 100px; 
-                text-align: right !important;
+            .high-duration .duration-bar {
+                background: #d73a49;
+                opacity: 1;
+                height: 4px;
             }
-            .high-duration {
-                color: #d73a49;
-                font-weight: bold;
-                background-color: #fffbdd;
-            }
-            .col-time { width: 140px; color: #6a737d; }
-            .col-logger { width: 220px; color: #005cc5; }
-            .col-message { min-width: 400px; white-space: pre-wrap; word-break: break-all; }
+            .high-duration-text { color: #d73a49; font-weight: bold; }
+            .col-elapsed { width: 100px; text-align: right; }
+            .col-time { width: 130px; color: #6a737d; }
+            .col-logger { width: 200px; color: #005cc5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .col-message { white-space: pre-wrap; }
+            #trace-report-table tr:hover { background-color: #f1f8ff; }
+            #trace-report-table tr.active-step { background-color: #fffbdd; }
         `;
         document.head.appendChild(style);
     }
 
-    // 函数：添加复制按钮
+    function setupInteractions() {
+        const axis = document.getElementById('trace-time-axis');
+        const container = document.getElementById('trace-table-container');
+        const indicator = document.getElementById('axis-indicator');
+        const rows = Array.from(document.querySelectorAll('#trace-report-table tbody tr'));
+
+        if (!axis || !container) return;
+
+        let isDragging = false;
+        const handleInteraction = (e) => {
+            const rect = axis.getBoundingClientRect();
+            let y = e.clientY - rect.top;
+            y = Math.max(0, Math.min(y, rect.height));
+            const percent = (y / rect.height) * 100;
+            
+            // Find closest row
+            let closestRow = rows[0];
+            let minDiff = 100;
+            
+            rows.forEach(row => {
+                const rowPos = parseFloat(row.dataset.pos);
+                const diff = Math.abs(rowPos - percent);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closestRow = row;
+                }
+            });
+
+            closestRow.scrollIntoView({ block: 'center' });
+            highlightRow(closestRow);
+        };
+
+        axis.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            handleInteraction(e);
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (isDragging) handleInteraction(e);
+        });
+
+        window.addEventListener('mouseup', () => {
+            isDragging = false;
+        });
+
+        // Update indicator on scroll
+        container.addEventListener('scroll', () => {
+            if (isDragging) return; // Don't fight with manual scrolling
+            const containerRect = container.getBoundingClientRect();
+            const topRow = rows.find(row => {
+                const rowRect = row.getBoundingClientRect();
+                return rowRect.top >= containerRect.top;
+            }) || rows[0];
+
+            indicator.style.top = `${topRow.dataset.pos}%`;
+        });
+
+        function highlightRow(row) {
+            rows.forEach(r => r.classList.remove('active-step'));
+            row.classList.add('active-step');
+        }
+    }
+
     function addCopyButton(titleElement) {
         injectStyles();
         
-        // 创建报告容器
-        const reportContainer = document.createElement('div');
-        reportContainer.id = 'copy-title-button';
-        
-        const logs = processLogs(titleElement.textContent);
-        reportContainer.innerHTML = buildReportTable(logs);
-        
-        // 将报告添加到页面底部或标题元素旁边
-        // 如果已经存在，先移除
-        const existing = document.getElementById('copy-title-button');
+        const existing = document.getElementById('trace-report-wrapper-container');
         if (existing) existing.remove();
         
-        document.body.appendChild(reportContainer);
+        const wrapperContainer = document.createElement('div');
+        wrapperContainer.id = 'trace-report-wrapper-container';
+        
+        const logs = processLogs(titleElement.textContent);
+        wrapperContainer.innerHTML = buildReport(logs);
+        
+        document.body.appendChild(wrapperContainer);
+        setupInteractions();
     }
 
-    // 检查页面是否已经加载完毕
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
         const titleElement = document.querySelector('div[data-test-subj="tableDocViewRow-content-value"]');
         if (titleElement) {

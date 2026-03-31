@@ -2,7 +2,7 @@
 // @name         trace report
 // @namespace    http://tampermonkey.net/
 // @version      2025-03-26
-// @description  Optimized trace report with vertical time axis and visual duration bars
+// @description  Optimized trace report with segmented time axis (Gantt-style) and visual duration bars
 // @author       You
 // @match        https://kibana.remarkablefoods.net/app/discover*
 // @match        https://kibana.foodtruck-qa.com/app/discover*
@@ -136,11 +136,15 @@
         if (processed.length > 0) {
             const startTime = processed[0].timestampNs;
             const endTime = processed[processed.length - 1].timestampNs;
-            const totalDuration = endTime - startTime || 1;
+            const totalTraceDuration = endTime - startTime || 1;
             
             processed.forEach(log => {
-                log.relativePos = ((log.timestampNs - startTime) / totalDuration) * 100;
-                log.durationPercent = log.elapsed ? (log.elapsed / maxElapsed) * 100 : 0;
+                log.relativePos = ((log.timestampNs - startTime) / totalTraceDuration) * 100;
+                log.durationPercentOfMax = log.elapsed ? (log.elapsed / maxElapsed) * 100 : 0;
+                log.durationPercentOfTotal = log.elapsed ? (log.elapsed / totalTraceDuration) * 100 : 0;
+                // A segment starts at (timestamp - elapsed)
+                log.segmentStartPos = log.elapsed ? (((log.timestampNs - log.elapsed) - startTime) / totalTraceDuration) * 100 : log.relativePos;
+                if (log.segmentStartPos < 0) log.segmentStartPos = 0;
             });
         }
 
@@ -165,20 +169,40 @@
 
         processedLogs.forEach(log => {
             const isHighDuration = log.elapsed > HIGH_DURATION_THRESHOLD_NS;
-            const markerClass = isHighDuration ? 'time-marker high-duration' : 'time-marker';
             
-            axisHtml += `<div class="${markerClass}" style="top: ${log.relativePos}%" title="${log.formattedElapsed || log.timestampStr}"></div>`;
+            // Build Time Axis Segments
+            if (log.elapsed && log.durationPercentOfTotal > 0.1) {
+                // If it's a very long block (like a summary log), we style it slightly differently or use a lower z-index
+                const isSummary = log.durationPercentOfTotal > 95;
+                const blockClass = isHighDuration ? 'time-block high' : 'time-block normal';
+                const summaryClass = isSummary ? 'summary-block' : '';
+                
+                axisHtml += `
+                    <div class="${blockClass} ${summaryClass}" 
+                         style="top: ${log.segmentStartPos}%; height: ${log.durationPercentOfTotal}%" 
+                         title="${log.formattedElapsed} [${log.logger}]"
+                         data-target="${log.id}">
+                    </div>`;
+            } else {
+                // For logs without duration or very small ones, just a marker
+                axisHtml += `
+                    <div class="time-marker" 
+                         style="top: ${log.relativePos}%" 
+                         title="${log.timestampStr}"
+                         data-target="${log.id}">
+                    </div>`;
+            }
             
             tableHtml += `
                 <tr id="${log.id}" data-pos="${log.relativePos}">
                     <td class="col-elapsed">
                         <div class="duration-container ${isHighDuration ? 'high-duration' : ''}">
                             <span class="${isHighDuration ? 'high-duration-text' : ''}">${log.formattedElapsed || ''}</span>
-                            ${log.elapsed ? `<div class="duration-bar" style="width: ${log.durationPercent}%"></div>` : ''}
+                            ${log.elapsed ? `<div class="duration-bar" style="width: ${log.durationPercentOfMax}%"></div>` : ''}
                         </div>
                     </td>
                     <td class="col-time">${escapeHtml(log.timestampStr)}</td>
-                    <td class="col-logger">${escapeHtml(log.logger)}</td>
+                    <td class="col-logger" title="${escapeHtml(log.logger)}">${escapeHtml(log.logger)}</td>
                     <td class="col-message">${escapeHtml(log.content)}</td>
                 </tr>
             `;
@@ -188,8 +212,9 @@
         tableHtml += '</tbody></table></div>';
 
         return `
-            <div id="trace-report-header" style="margin: 20px 20px 0 20px; font-weight: bold; font-size: 18px; color: #0366d6; border-bottom: 2px solid #0366d6; padding-bottom: 5px;">
-                Trace Execution Report
+            <div id="trace-report-header" style="margin: 20px 20px 0 20px; font-weight: bold; font-size: 18px; color: #0366d6; border-bottom: 2px solid #0366d6; padding-bottom: 5px; display: flex; justify-content: space-between; align-items: center;">
+                <span>Trace Execution Report</span>
+                <span style="font-size: 12px; font-weight: normal; color: #6a737d;">Click or Drag on left axis to navigate</span>
             </div>
             <div id="trace-report-wrapper">
                 ${axisHtml}
@@ -207,7 +232,7 @@
             #trace-report-wrapper {
                 display: flex;
                 margin: 0 20px 20px 20px;
-                height: calc(90vh - 100px);
+                height: calc(90vh - 120px);
                 background: #ffffff;
                 border: 1px solid #e1e4e8;
                 border-radius: 0 0 6px 6px;
@@ -216,7 +241,7 @@
                 font-family: 'Roboto Mono', Menlo, Monaco, Consolas, monospace;
             }
             #trace-time-axis {
-                width: 30px;
+                width: 40px;
                 background: #f6f8fa;
                 border-right: 1px solid #dfe2e5;
                 position: relative;
@@ -229,27 +254,48 @@
                 right: 0;
                 height: 1px;
                 background: #0366d6;
+                opacity: 0.3;
+                z-index: 1;
+            }
+            .time-block {
+                position: absolute;
+                left: 4px;
+                right: 4px;
+                border-radius: 2px;
+                min-height: 2px;
+                z-index: 2;
+                transition: transform 0.1s;
+            }
+            .time-block:hover {
+                transform: scaleX(1.1);
+                z-index: 10;
+            }
+            .time-block.normal {
+                background: #0366d6;
                 opacity: 0.4;
             }
-            .time-marker.high-duration {
+            .time-block.high {
                 background: #d73a49;
-                opacity: 1;
-                height: 3px;
-                z-index: 2;
-                border-top: 1px solid white;
-                border-bottom: 1px solid white;
+                opacity: 0.8;
+                box-shadow: 0 0 2px rgba(215, 58, 73, 0.5);
+            }
+            .summary-block {
+                left: 0 !important;
+                right: 0 !important;
+                opacity: 0.1 !important;
+                z-index: 0 !important;
+                border-radius: 0;
             }
             #axis-indicator {
                 position: absolute;
                 left: 0;
                 right: 0;
                 height: 2px;
-                background: #0366d6;
+                background: #24292e;
                 border: 1px solid white;
-                z-index: 5;
-                box-shadow: 0 0 4px rgba(3,102,214,0.5);
-                transition: top 0.1s;
+                z-index: 20;
                 pointer-events: none;
+                box-shadow: 0 0 4px rgba(0,0,0,0.3);
             }
             #trace-table-container {
                 flex-grow: 1;
@@ -259,7 +305,7 @@
             #trace-report-table {
                 width: 100%;
                 border-collapse: collapse;
-                font-size: 12px;
+                font-size: 11px;
                 table-layout: fixed;
             }
             #trace-report-table th {
@@ -268,11 +314,11 @@
                 border: 1px solid #dfe2e5;
                 position: sticky;
                 top: 0;
-                z-index: 10;
+                z-index: 100;
                 text-align: left;
             }
             #trace-report-table td {
-                padding: 6px 12px;
+                padding: 4px 12px;
                 border: 1px solid #dfe2e5;
                 vertical-align: top;
                 word-break: break-all;
@@ -285,21 +331,21 @@
             .duration-bar {
                 height: 3px;
                 background: #0366d6;
-                opacity: 0.6;
+                opacity: 0.4;
                 margin-top: 2px;
             }
             .high-duration .duration-bar {
                 background: #d73a49;
-                opacity: 1;
+                opacity: 0.8;
                 height: 4px;
             }
             .high-duration-text { color: #d73a49; font-weight: bold; }
-            .col-elapsed { width: 100px; text-align: right; }
-            .col-time { width: 130px; color: #6a737d; }
-            .col-logger { width: 200px; color: #005cc5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-            .col-message { white-space: pre-wrap; }
+            .col-elapsed { width: 90px; text-align: right; }
+            .col-time { width: 120px; color: #6a737d; }
+            .col-logger { width: 180px; color: #005cc5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .col-message { white-space: pre-wrap; color: #24292e; }
             #trace-report-table tr:hover { background-color: #f1f8ff; }
-            #trace-report-table tr.active-step { background-color: #fffbdd; }
+            #trace-report-table tr.active-step { background-color: #fffbdd; outline: 1px solid #e2cc33; }
         `;
         document.head.appendChild(style);
     }
@@ -313,6 +359,7 @@
         if (!axis || !container) return;
 
         let isDragging = false;
+        
         const handleInteraction = (e) => {
             const rect = axis.getBoundingClientRect();
             let y = e.clientY - rect.top;
@@ -351,8 +398,9 @@
 
         // Update indicator on scroll
         container.addEventListener('scroll', () => {
-            if (isDragging) return; // Don't fight with manual scrolling
+            if (isDragging) return;
             const containerRect = container.getBoundingClientRect();
+            // Find the row currently at the top of the viewport
             const topRow = rows.find(row => {
                 const rowRect = row.getBoundingClientRect();
                 return rowRect.top >= containerRect.top;

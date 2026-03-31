@@ -59,46 +59,73 @@
     }
 
     /**
-     * Process log strings into structured data objects
+     * Process log strings into structured data objects, grouping multi-line logs
      * @param {string} logString - The input log string with multiple lines
      * @return {Array} - Array of parsed log objects
      */
     function processLogs(logString) {
-        const lines = logString.split('\n').filter(line => line.trim());
+        const lines = logString.split('\n');
+        const groups = [];
+        let currentGroup = null;
+        const timestampRegex = /^\s*(\d{2}:\d{2}\.\d{9})/;
+
+        lines.forEach(line => {
+            const trimmedLine = line.trim();
+            if (!trimmedLine && !currentGroup) return; // Skip leading empty lines
+
+            if (timestampRegex.test(line)) {
+                if (currentGroup) groups.push(currentGroup);
+                currentGroup = [line];
+            } else if (currentGroup) {
+                currentGroup.push(line);
+            } else {
+                currentGroup = [line];
+            }
+        });
+        if (currentGroup) groups.push(currentGroup);
         
-        return lines.map(line => {
-            // Extract relative timestamp (e.g., 00:00.001179021)
-            const timestampMatch = line.match(/^(\d{2}:\d{2}\.\d{9})/);
-            const timestamp = timestampMatch ? timestampMatch[1] : '';
+        return groups.map(group => {
+            const firstLine = group[0];
+            const fullText = group.join('\n').trim();
             
-            // Extract elapsed time (e.g., elapsed=927217)
-            const elapsedMatch = line.match(/elapsed=(\d+)$/);
+            // Extract relative timestamp from first line
+            const timestampMatch = firstLine.match(timestampRegex);
+            const timestamp = timestampMatch ? timestampMatch[1].trim() : '';
+            
+            // Extract elapsed time from the VERY END of the group
+            const elapsedMatch = fullText.match(/elapsed=(\d+)$/);
             const elapsedNs = elapsedMatch ? parseInt(elapsedMatch[1]) : null;
             
-            // Extract the core message part
-            let coreMessage = line;
+            // Extract the core text
+            let coreText = fullText;
             if (timestamp) {
-                coreMessage = coreMessage.substring(timestamp.length).trim();
+                // Remove timestamp from the beginning of the fullText
+                const tsIndex = coreText.indexOf(timestamp);
+                coreText = coreText.substring(tsIndex + timestamp.length).trim();
             }
+            
+            // Remove elapsed part if it exists at the end
             if (elapsedMatch) {
-                const elapsedIndex = coreMessage.lastIndexOf(', elapsed=');
-                if (elapsedIndex !== -1) {
-                    coreMessage = coreMessage.substring(0, elapsedIndex).trim();
+                const elapsedMarker = ', elapsed=';
+                const lastMarkerIndex = coreText.lastIndexOf(elapsedMarker);
+                if (lastMarkerIndex !== -1 && lastMarkerIndex > coreText.length - 50) {
+                    coreText = coreText.substring(0, lastMarkerIndex).trim();
                 } else {
-                    const altElapsedIndex = coreMessage.lastIndexOf(' elapsed=');
-                    if (altElapsedIndex !== -1) {
-                        coreMessage = coreMessage.substring(0, altElapsedIndex).trim();
+                    const altMarker = ' elapsed=';
+                    const altMarkerIndex = coreText.lastIndexOf(altMarker);
+                    if (altMarkerIndex !== -1 && altMarkerIndex > coreText.length - 50) {
+                        coreText = coreText.substring(0, altMarkerIndex).trim();
                     }
                 }
             }
             
-            // Split logger and actual message if possible (looking for ' - ')
+            // Split logger and actual message
             let logger = '';
-            let content = coreMessage;
-            const separatorIndex = coreMessage.indexOf(' - ');
-            if (separatorIndex !== -1) {
-                logger = coreMessage.substring(0, separatorIndex).trim();
-                content = coreMessage.substring(separatorIndex + 3).trim();
+            let content = coreText;
+            const separatorIndex = coreText.indexOf(' - ');
+            if (separatorIndex !== -1 && separatorIndex < 100) { // Logger is usually at the start
+                logger = coreText.substring(0, separatorIndex).trim();
+                content = coreText.substring(separatorIndex + 3).trim();
             }
 
             return {
@@ -131,7 +158,7 @@
         `;
 
         processedLogs.forEach(log => {
-            const isHighDuration = log.elapsed > 500000000; // > 0.5s (500ms)
+            const isHighDuration = log.elapsed > 200000000; // > 0.5s (500ms)
             html += `
                 <tr>
                     <td class="col-elapsed ${isHighDuration ? 'high-duration' : ''}">${log.formattedElapsed || ''}</td>

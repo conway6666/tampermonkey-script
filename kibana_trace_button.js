@@ -20,11 +20,7 @@
             const flyout = document.querySelector('[data-test-subj="docViewerFlyout"]');
             if (!flyout) return;
 
-            // 2. Check if we already added our button
-            if (flyout.querySelector('.trace-log-link-added')) return;
-
-            // 3. Extract Index and ID from the flyout content
-            // These IDs are stable across Kibana versions usually
+            // 2. Extract Index and ID from the flyout content
             const indexElem = flyout.querySelector('#tableDocViewRow-_index-value');
             const idElem = flyout.querySelector('#tableDocViewRow-_id-value');
 
@@ -33,30 +29,46 @@
             const indexName = indexElem.innerText.trim();
             const docId = idElem.innerText.trim();
 
-            // We only care if it's an action log index
-            if (!indexName.startsWith('action-')) return;
 
-            // 4. Find injection point (e.g., Breadcrumbs or Actions section)
+            // We only care if it's an action log index
+            if (!indexName.startsWith('action-')) {
+                // Remove existing button if we switched to a non-action document
+                const existing = flyout.querySelector('.trace-log-link-added');
+                if (existing) existing.remove();
+                return;
+            }
+
+            // 3. Construct Trace URL
+            const baseUrl = window.location.origin;
+            const traceUrl = `${baseUrl}/app/discover#/doc/trace-pattern/trace-*?id=${docId}`;
+
+            // 4. Check if we already added our button
+            const existingLink = flyout.querySelector('.trace-log-link-added-anchor');
+            if (existingLink) {
+                // If it exists but the ID is old, update it
+                if (existingLink.href !== traceUrl) {
+                    existingLink.href = traceUrl;
+                }
+                return;
+            }
+
+            // 5. Find injection point
             const actionsContainer = flyout.querySelector('[data-test-subj="docViewerFlyoutActions"]');
             const breadcrumbList = flyout.querySelector('.euiBreadcrumbs__list');
 
             if (!actionsContainer && !breadcrumbList) return;
 
-            // 5. Construct Trace URL
-            // Format: /app/discover#/doc/trace-pattern/trace-*?id=DOC_ID
-            const baseUrl = window.location.origin;
-            const traceUrl = `${baseUrl}/app/discover#/doc/trace-pattern/trace-*?id=${docId}`;
-
             // 6. Create and inject the button
             const listItem = document.createElement('li');
             listItem.className = 'euiBreadcrumb trace-log-link-added';
-const link = document.createElement('a');
-link.className = 'euiLink euiBreadcrumb__content';
-link.href = traceUrl;
-link.target = '_blank';
-link.rel = 'noopener noreferrer';
-link.title = 'Trace Log';
-link.innerText = 'Trace Log';
+
+            const link = document.createElement('a');
+            link.className = 'euiLink euiBreadcrumb__content trace-log-link-added-anchor';
+            link.href = traceUrl;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.title = 'Trace Log';
+            link.innerText = 'Trace Log';
             link.style.color = '#006BB8';
             link.style.fontWeight = 'bold';
             link.style.marginLeft = '10px';
@@ -65,10 +77,9 @@ link.innerText = 'Trace Log';
                 listItem.appendChild(link);
                 breadcrumbList.appendChild(listItem);
             } else if (actionsContainer) {
-                // If breadcrumbs not found, put it in actions
                 const actionItem = document.createElement('div');
                 actionItem.className = 'euiFlexItem css-kpsrin-euiFlexItem-growZero trace-log-link-added';
-                link.className = 'euiButtonEmpty euiButtonDisplay-euiButtonEmpty-s-empty-primary';
+                link.className = 'euiButtonEmpty euiButtonDisplay-euiButtonEmpty-s-empty-primary trace-log-link-added-anchor';
                 actionItem.appendChild(link);
                 actionsContainer.appendChild(actionItem);
             }
@@ -78,7 +89,7 @@ link.innerText = 'Trace Log';
         }
     }
 
-    // Observer to watch for flyout appearance
+    // Observer to watch for flyout appearance or content changes
     const observer = new MutationObserver(() => {
         addTraceButton();
     });
